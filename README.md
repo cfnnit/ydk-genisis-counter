@@ -1,5 +1,5 @@
 # ydk-genisis-counter
-Genesis의 오탈자를 난 사실을 레포지트리 만들고 깨달은 바보.
+Genesis의 오탈자를 리포지트리 만들고 깨달은 바보.
 
 ## 사용법
 1. 릴리즈에서 파일을 [다운로드](https://github.com/cfnnit/ydk-genisis-counter/releases/tag/release) 합니다.
