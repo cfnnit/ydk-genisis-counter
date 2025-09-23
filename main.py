@@ -6,6 +6,16 @@ import threading
 import requests
 from concurrent.futures import ThreadPoolExecutor
 import urllib.parse
+import html
+
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
 
 POINTS_FILE = "point_250923.txt"
 API_URL = "https://db.ygoprodeck.com/api/v7/cardinfo.php"
@@ -22,18 +32,26 @@ def get_korean_name_from_konami(english_name):
         }
         search_resp = requests.get(search_url, headers=headers, timeout=10)
         search_resp.raise_for_status()
-        html = search_resp.text
+        html_text = search_resp.text
 
-        pattern = re.compile(
-            r'class="cnm"\s+value="' + re.escape(english_name) + r'".*?class="link_value"\s+value="([^"]+)"',
+        pair_pattern = re.compile(
+            r'class="cnm"\s+value=[\'\"]([^\'\"]+)[\'\"][\s\S]*?class="link_value"\s+value=[\'\"]([^\'\"]+)[\'\"]',
             re.DOTALL
         )
-        m = pattern.search(html)
-        if not m:
+        candidates = pair_pattern.findall(html_text)
+        if not candidates:
             return None
-        relative_detail = m.group(1)
-        detail_url = KONAMI_DB_BASE + relative_detail + "&request_locale=ko"
 
+        selected_relative = None
+        for cnm_value, link_value in candidates:
+            cnm_unescaped = html.unescape(cnm_value).strip()
+            if cnm_unescaped == english_name:
+                selected_relative = link_value
+                break
+        if selected_relative is None:
+            selected_relative = candidates[0][1]
+
+        detail_url = KONAMI_DB_BASE + selected_relative + "&request_locale=ko"
         detail_resp = requests.get(detail_url, headers=headers, timeout=10)
         detail_resp.raise_for_status()
         detail_html = detail_resp.text
@@ -50,7 +68,6 @@ def get_korean_name_from_konami(english_name):
         return None
 
 def fetch_card_data(passcode, points, options, app_instance):
-    """Fetches data for a single card and returns its names and score."""
     card_name_ko = f"알 수 없는 카드 ({passcode})"
     card_name_en = None
     score = 0
@@ -87,10 +104,9 @@ def fetch_card_data(passcode, points, options, app_instance):
     return (card_name_ko, score)
 
 def load_points(app):
-    """Loads card points."""
     points = {}
     try:
-        with open(POINTS_FILE, "r", encoding="utf-8") as f:
+        with open(resource_path(POINTS_FILE), "r", encoding="utf-8") as f:
             next(f)
             for line in f:
                 parts = line.strip().split('\t')
@@ -102,7 +118,6 @@ def load_points(app):
     return points
 
 def calculate_deck_score_api(ydk_file, points, result_text_widget, app_instance, options):
-    """Calculates the score concurrently and displays results at the end, with Side Deck option."""
     try:
         app_instance.root.after(0, lambda: app_instance.calculate_btn.config(state=tk.DISABLED))
         app_instance.root.after(0, lambda: app_instance.status_label.config(text="계산 중..."))
