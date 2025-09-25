@@ -1,5 +1,6 @@
 # ydk-genisis-counter
-Genesis의 오탈자를 리포지트리 만들고 깨달은 바보.
+에도프로, 오메가프로, Mdpro3와 같은 서드파티 유희왕 게임의 덱파일(ydk)를 사용하여 제네시스 룰 포인트를 계산하는 프로그램/
+~~Genesis의 오탈자를 리포지트리 만들고 깨달은 바보.~~
 
 ## 사용법
 1. 릴리즈에서 파일을 [다운로드](https://github.com/cfnnit/ydk-genisis-counter/releases/latest) 합니다.
