@@ -1,5 +1,3 @@
- 
-
 Card Name		Points
 Abyss Dweller	100
 Amorphactor Pain, the Imagination Dracoverlord	100
@@ -536,4 +534,5 @@ Rank-Up-Magic Zexal Force	1
 Rise Rank-Up-Magic Raidraptor's Force	1
 Stardust Sifr Divine Dragon	1
 Supreme King Dragon Starving Venom	1
+
 The Phantom Knights' Rank-Up-Magic Launch	1
