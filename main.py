@@ -25,7 +25,7 @@ def resource_path(relative_path):
 API_URL = "https://db.ygoprodeck.com/api/v7/cardinfo.php"
 KONAMI_DB_BASE = "https://www.db.yugioh-card.com"
 KONAMI_DB_SEARCH_URL = KONAMI_DB_BASE + "/yugiohdb/card_search.action?ope=1&sess=1&rp=10&mode=&sort=1&keyword={}"
-MAX_WORKERS = 10
+MAX_WORKERS = 20
 GITHUB_API_URL = "https://api.github.com/repos/cfnnit/ydk-genisis-counter/contents/point%20rule"
 
 GITHUB_HEADERS = {
@@ -37,7 +37,6 @@ KONAMI_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
 
-# 캐시 딕셔너리들
 korean_name_cache = {}
 card_data_cache = {}
 
@@ -174,12 +173,125 @@ def get_korean_name_from_konami(english_name):
         korean_name_cache[english_name] = None
         return None
 
+def get_english_name_from_cid(cid):
+    cache_key = f"cid_{cid}"
+    if cache_key in korean_name_cache:
+        return korean_name_cache[cache_key]
+    
+    try:
+        detail_url = f"{KONAMI_DB_BASE}/yugiohdb/card_search.action?ope=2&cid={cid}&request_locale=en"
+        detail_resp = requests.get(detail_url, headers=KONAMI_HEADERS, timeout=5)
+        detail_resp.raise_for_status()
+
+        title_pattern = re.compile(r'<title>([^<]+)</title>', re.IGNORECASE)
+        title_match = title_pattern.search(detail_resp.text)
+        if not title_match:
+            korean_name_cache[cache_key] = None
+            return None
+            
+        title_text = title_match.group(1).strip()
+        english_name = title_text.split('|')[0].strip()
+        result = english_name if english_name else None
+        korean_name_cache[cache_key] = result
+        return result
+        
+    except requests.exceptions.RequestException:
+        korean_name_cache[cache_key] = None
+        return None
+    except Exception:
+        korean_name_cache[cache_key] = None
+        return None
+
+def extract_cards_from_html(html_content):
+    cards = {
+        'main': [],
+        'side': [],
+        'extra': []
+    }
+
+    main_pattern = re.compile(r'\$\("#detailtext_main[^"]*"[^}]*cid=(\d+)', re.IGNORECASE | re.DOTALL)
+    extra_pattern = re.compile(r'\$\("#detailtext_ext[^"]*"[^}]*cid=(\d+)', re.IGNORECASE | re.DOTALL)
+    side_pattern = re.compile(r'\$\("#detailtext_side[^"]*"[^}]*cid=(\d+)', re.IGNORECASE | re.DOTALL)
+    all_cid_pattern = re.compile(r'cid=(\d+)', re.IGNORECASE)
+    
+    main_matches = main_pattern.findall(html_content)
+    extra_matches = extra_pattern.findall(html_content)
+    side_matches = side_pattern.findall(html_content)
+    
+    cards['main'].extend(main_matches)
+    cards['extra'].extend(extra_matches)
+    cards['side'].extend(side_matches)
+    
+    if not any(cards.values()):
+        all_cids = all_cid_pattern.findall(html_content)
+        
+        chunk_size = 5000
+        for i in range(0, len(html_content), chunk_size):
+            chunk = html_content[i:i + chunk_size].lower()
+            
+            for cid in all_cids:
+                if cid not in cards['main'] and cid not in cards['side'] and cid not in cards['extra']:
+                    if 'detailtext_side' in chunk and cid in chunk:
+                        cards['side'].append(cid)
+                    elif 'detailtext_ext' in chunk and cid in chunk:
+                        cards['extra'].append(cid)
+                    elif 'detailtext_main' in chunk and cid in chunk:
+                        cards['main'].append(cid)
+    
+    cards['main'] = list(set(cards['main']))
+    cards['side'] = list(set(cards['side']))
+    cards['extra'] = list(set(cards['extra']))
+    
+    return cards
+
+def fetch_card_data_from_cid(cid, points, options, app_instance):
+    cache_key = f"cid_{cid}_{options['scrape_yugipedia']}_{options['show_zero_points']}"
+    if cache_key in card_data_cache:
+        return card_data_cache[cache_key]
+    
+    card_name_ko = f"알 수 없는 카드 (cid:{cid})"
+    card_name_en = None
+    score = 0
+
+    try:
+        english_cache_key = f"cid_{cid}"
+        if english_cache_key in korean_name_cache:
+            card_name_en = korean_name_cache[english_cache_key]
+        else:
+            card_name_en = get_english_name_from_cid(cid)
+            
+        if not card_name_en:
+            result = (card_name_ko, 0) if options['show_zero_points'] else None
+            card_data_cache[cache_key] = result
+            return result
+            
+        card_name_ko = card_name_en
+        
+        if options['scrape_yugipedia'] and card_name_en:
+            if card_name_en in korean_name_cache:
+                korean_name = korean_name_cache[card_name_en]
+                if korean_name:
+                    card_name_ko = korean_name
+            else:
+                scraped_name = get_korean_name_from_konami(card_name_en)
+                if scraped_name:
+                    card_name_ko = scraped_name
+
+        score = points.get(card_name_en, 0)
+
+    except Exception as e:
+        print(f"cid {cid} 처리 중 오류: {e}")
+    
+    result = (card_name_ko, score) if (options['show_zero_points'] or score > 0) else None
+    card_data_cache[cache_key] = result
+    return result
+
 def fetch_card_data(passcode, points, options, app_instance):
     cache_key = f"{passcode}_{options['scrape_yugipedia']}_{options['show_zero_points']}"
     if cache_key in card_data_cache:
         return card_data_cache[cache_key]
     
-    card_name_ko = f"알 수 없는 카드 ({passcode})"
+    card_name_ko = f"알 수 없는 카드 (password:{passcode})"
     card_name_en = None
     score = 0
 
@@ -210,6 +322,117 @@ def fetch_card_data(passcode, points, options, app_instance):
     result = (card_name_ko, score) if (options['show_zero_points'] or score > 0) else None
     card_data_cache[cache_key] = result
     return result
+
+def calculate_url_score(url, points, result_text_widget, app_instance, options):
+    try:
+        app_instance.root.after(0, lambda: app_instance.calculate_url_btn.config(state=tk.DISABLED))
+        app_instance.root.after(0, lambda: app_instance.status_label.config(text="URL에서 덱 정보 가져오는 중..."))
+
+        result_text_widget.config(state=tk.NORMAL)
+        result_text_widget.delete(1.0, tk.END)
+        
+        app_instance.root.after(0, lambda: app_instance.status_label.config(text="URL에서 덱 정보 다운로드 중..."))
+        response = requests.get(url, headers=KONAMI_HEADERS, timeout=10)
+        response.raise_for_status()
+        html_content = response.text
+        
+        app_instance.root.after(0, lambda: app_instance.status_label.config(text="HTML에서 카드 정보 추출 중..."))
+        cards = extract_cards_from_html(html_content)
+        
+        total_cards = len(cards['main']) + len(cards['side']) + len(cards['extra'])
+        print(f"발견된 카드: 메인 {len(cards['main'])}, 사이드 {len(cards['side'])}, 엑스트라 {len(cards['extra'])} (총 {total_cards}장)")
+        
+        main_deck_cards_to_display = []
+        main_deck_total_score = 0
+        side_deck_cards_to_display = []
+        side_deck_total_score = 0
+        extra_deck_cards_to_display = []
+        extra_deck_total_score = 0
+        
+        if cards['main']:
+            app_instance.root.after(0, lambda: app_instance.status_label.config(text=f"메인 덱 카드 정보 가져오는 중... ({len(cards['main'])}장)"))
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                fetch_func = lambda cid: fetch_card_data_from_cid(cid, points, options, app_instance)
+                main_deck_results = list(executor.map(fetch_func, cards['main']))
+        else:
+            main_deck_results = []
+
+        for result in main_deck_results:
+            if result is not None:
+                name, score = result
+                main_deck_cards_to_display.append((name, score))
+                main_deck_total_score += score
+
+        if cards['extra']:
+            app_instance.root.after(0, lambda: app_instance.status_label.config(text=f"엑스트라 덱 카드 정보 가져오는 중... ({len(cards['extra'])}장)"))
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                fetch_func = lambda cid: fetch_card_data_from_cid(cid, points, options, app_instance)
+                extra_deck_results = list(executor.map(fetch_func, cards['extra']))
+
+            for result in extra_deck_results:
+                if result is not None:
+                    name, score = result
+                    extra_deck_cards_to_display.append((name, score))
+                    extra_deck_total_score += score
+        else:
+            extra_deck_results = []
+
+        if options['include_side_deck'] and cards['side']:
+            app_instance.root.after(0, lambda: app_instance.status_label.config(text=f"사이드 덱 카드 정보 가져오는 중... ({len(cards['side'])}장)"))
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                fetch_func = lambda cid: fetch_card_data_from_cid(cid, points, options, app_instance)
+                side_deck_results = list(executor.map(fetch_func, cards['side']))
+
+            for result in side_deck_results:
+                if result is not None:
+                    name, score = result
+                    side_deck_cards_to_display.append((name, score))
+                    side_deck_total_score += score
+        else:
+            side_deck_results = []
+
+        result_text_widget.insert(tk.END, f"--- 메인 덱 ---\n")
+        if options['aggregate_same_cards']:
+            all_main_cards = main_deck_cards_to_display + extra_deck_cards_to_display
+            aggregated_main = aggregate_cards(all_main_cards)
+            for name, total_score, unit_score in aggregated_main:
+                if "x" in name:
+                    result_text_widget.insert(tk.END, f"{name} - {total_score} ({unit_score})\n")
+                else:
+                    result_text_widget.insert(tk.END, f"{name} - {total_score}\n")
+        else:
+            for name, score in main_deck_cards_to_display:
+                result_text_widget.insert(tk.END, f"{name} - {score}\n")
+            for name, score in extra_deck_cards_to_display:
+                result_text_widget.insert(tk.END, f"{name} - {score}\n")
+        
+        main_and_extra_total = main_deck_total_score + extra_deck_total_score
+        result_text_widget.insert(tk.END, f"\n메인 덱 포인트: {main_and_extra_total}\n")
+
+        if options['include_side_deck'] and cards['side']:
+            result_text_widget.insert(tk.END, f"\n--- 사이드 덱 ---\n")
+            if options['aggregate_same_cards']:
+                aggregated_side = aggregate_cards(side_deck_cards_to_display)
+                for name, total_score, unit_score in aggregated_side:
+                    if "x" in name:
+                        result_text_widget.insert(tk.END, f"{name} - {total_score} ({unit_score})\n")
+                    else:
+                        result_text_widget.insert(tk.END, f"{name} - {total_score}\n")
+            else:
+                for name, score in side_deck_cards_to_display:
+                    result_text_widget.insert(tk.END, f"{name} - {score}\n")
+            result_text_widget.insert(tk.END, f"\n사이드 덱 포인트: {side_deck_total_score}\n")
+
+        grand_total_score = main_and_extra_total + side_deck_total_score
+        result_text_widget.insert(tk.END, f"\n--- 전체 포인트: {grand_total_score} ---\n")
+
+    except Exception as e:
+        result_text_widget.insert(tk.END, f"오류 발생: {e}\n")
+    finally:
+        save_caches(app_instance)
+        result_text_widget.config(state=tk.DISABLED)
+        app_instance.root.after(0, lambda: app_instance.calculate_url_btn.config(state=tk.NORMAL))
+        app_instance.root.after(0, lambda: app_instance.status_label.config(text="준비 완료."))
 
 def aggregate_cards(cards_list):
     card_count = {}
@@ -392,7 +615,7 @@ class YdkPointCalculatorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("메타파이즈 지원좀")
-        self.root.geometry("700x900")
+        self.root.geometry("700x950")
 
         self.points = None
         self.deck_folder = ""
@@ -424,6 +647,18 @@ class YdkPointCalculatorApp:
         self.select_folder_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.folder_label = tk.Label(self.folder_frame, text="선택된 폴더 없음", wraplength=300, justify=tk.LEFT)
         self.folder_label.pack(side=tk.LEFT, padx=(10, 0))
+
+        self.url_frame = tk.LabelFrame(self.main_frame, text="뉴런 URL 계산", padx=5, pady=5)
+        self.url_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        self.url_entry = tk.Entry(self.url_frame, width=60)
+        self.url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        self.url_entry.insert(0, "덱 제목 아래의 링크를 복사하세요. 뉴런 자체 오류, 누락으로인한 카드 누락에 주의")
+        self.url_entry.bind('<FocusIn>', self.on_url_entry_focus_in)
+        self.url_entry.bind('<FocusOut>', self.on_url_entry_focus_out)
+        
+        self.calculate_url_btn = tk.Button(self.url_frame, text="입력", command=self.calculate_url_score, state=tk.DISABLED)
+        self.calculate_url_btn.pack(side=tk.RIGHT)
 
         self.options_frame = tk.LabelFrame(self.main_frame, text="옵션", padx=5, pady=5)
         self.options_frame.pack(fill=tk.X, pady=5)
@@ -483,6 +718,8 @@ class YdkPointCalculatorApp:
 
         load_caches()
         self.initialize_app()
+        
+        self.url_entry.config(fg='gray')
 
     def initialize_app(self):
         self.status_label.config(text="포인트 파일 목록 가져오는 중...")
@@ -547,6 +784,7 @@ class YdkPointCalculatorApp:
                 self.points = load_points(self, self.current_points_file['filename'])
                 if self.points is not None:
                     self.root.after(0, lambda: self.calculate_btn.config(state=tk.NORMAL))
+                    self.root.after(0, lambda: self.calculate_url_btn.config(state=tk.NORMAL))
                     self.root.after(0, lambda: self.status_label.config(text=f"포인트 파일 로드 완료: {self.current_points_file['filename']}"))
                 else:
                     self.root.after(0, lambda: self.status_label.config(text="오류: 포인트 파일을 불러올 수 없습니다."))
@@ -628,6 +866,40 @@ class YdkPointCalculatorApp:
         }
 
         threading.Thread(target=calculate_deck_score_api, args=(full_path, self.points, self.result_text, self, options), daemon=True).start()
+
+    def on_url_entry_focus_in(self, event):
+        if self.url_entry.get() == "덱 제목 아래의 링크를 복사하세요. 뉴런 자체 오류, 누락으로인한 카드 누락에 주의":
+            self.url_entry.delete(0, tk.END)
+            self.url_entry.config(fg='black')
+
+    def on_url_entry_focus_out(self, event):
+        """URL 입력창 포커스 아웃 이벤트"""
+        if not self.url_entry.get():
+            self.url_entry.insert(0, "덱 제목 아래의 링크를 복사하세요. 뉴런 자체 오류, 누락으로인한 카드 누락에 주의")
+            self.url_entry.config(fg='gray')
+
+    def calculate_url_score(self):
+        url = self.url_entry.get().strip()
+        if not url or url == "덱 제목 아래의 링크를 복사하세요. 뉴런 자체 오류, 누락으로인한 카드 누락에 주의":
+            self.show_error("URL을 입력해주세요.")
+            return
+        
+        if self.points is None:
+            self.show_error("포인트 파일이 올바르게 로드되지 않았습니다. 포인트 파일을 먼저 선택해주세요.")
+            return
+
+        if not url.startswith('http'):
+            self.show_error("올바른 URL을 입력해주세요.")
+            return
+        
+        options = {
+            'show_zero_points': self.show_zero_points.get(),
+            'scrape_yugipedia': self.scrape_yugipedia.get(),
+            'include_side_deck': self.include_side_deck.get(),
+            'aggregate_same_cards': self.aggregate_same_cards.get()
+        }
+
+        threading.Thread(target=calculate_url_score, args=(url, self.points, self.result_text, self, options), daemon=True).start()
 
     def show_error(self, message):
         self.result_text.config(state=tk.NORMAL)
